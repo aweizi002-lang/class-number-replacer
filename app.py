@@ -1,6 +1,6 @@
 """
-班号批量替换工具 v10 - 直接操作PDF文本对象
-核心思路：直接修改PDF内容流中的文本，完全无痕
+班号批量替换工具 v11 - 稳定覆盖版
+核心思路：用背景色覆盖 + 重新写入文字
 作者：微酱
 """
 
@@ -18,22 +18,21 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("📝 班号批量替换工具 v10")
-st.markdown("**直接修改PDF文本，无色块、无痕迹**")
+st.title("📝 班号批量替换工具 v11")
+st.markdown("**精准定位，背景覆盖重写**")
 st.markdown("---")
 
-with st.expander("📖 工作原理"):
+with st.expander("📖 使用说明"):
     st.markdown("""
-    ### 核心方法
-    直接在PDF内部修改文本内容，就像在编辑器里改字一样
-    
-    ### 适用情况
-    - 新旧班号字符相同 → 完美无痕（如 B250728 → B260830，用到的字符都是 0-9 和 B）
-    - 字符不同但长度相同 → 尝试直接替换（效果取决于PDF字体嵌入情况）
+    ### 工作原理
+    1. 精确搜索PDF中所有班号位置
+    2. 识别班号周围的背景色
+    3. 用背景色覆盖原班号区域
+    4. 在原位置写入新班号
     
     ### 注意事项
-    - 如果替换后文字显示异常，说明PDF字体没有包含新字符
-    - 此时可上传字体文件，工具会使用覆盖重写方式
+    - **必须上传字体文件**（HarmonyOS Sans SC）
+    - 确保新旧班号长度相同效果最佳
     """)
 
 st.markdown("### 1️⃣ 上传PDF文件")
@@ -48,12 +47,12 @@ if uploaded_files:
     st.success(f"已上传 {len(uploaded_files)} 个文件")
 
 st.markdown("---")
-st.markdown("### 2️⃣ 上传字体文件（可选）")
+st.markdown("### 2️⃣ 上传字体文件（必须）")
 
 font_file = st.file_uploader(
-    "上传字体文件（TTF/OTF）- 仅当直接替换失败时使用",
+    "上传字体文件（TTF/OTF）",
     type=["ttf", "otf"],
-    help="如果直接替换后文字显示异常，上传字体文件使用覆盖方式"
+    help="必须上传与原PDF相同的字体文件"
 )
 
 if font_file:
@@ -67,7 +66,7 @@ col1, col2 = st.columns(2)
 with col1:
     old_class_numbers = st.text_input(
         "旧班号",
-        placeholder="如：B250675"
+        placeholder="如：B260758"
     )
 
 with col2:
@@ -88,12 +87,6 @@ def validate_class_number(number):
     pattern = r"^[A-Z0-9]{3,10}$"
     return bool(re.match(pattern, number))
 
-def check_char_compatibility(old_text, new_text):
-    """检查新旧文本的字符兼容性"""
-    old_chars = set(old_text)
-    new_chars = set(new_text)
-    return new_chars.issubset(old_chars)
-
 old_numbers = parse_class_numbers(old_class_numbers)
 new_numbers = parse_class_numbers(new_class_numbers)
 
@@ -111,16 +104,6 @@ if old_numbers and new_numbers:
         
         if not invalid_old and not invalid_new:
             st.success("✅ 班号格式正确")
-            
-            for old, new in zip(old_numbers, new_numbers):
-                if check_char_compatibility(old, new):
-                    st.info(f"✓ {old} → {new}：字符完全兼容，直接替换无痕迹")
-                else:
-                    diff = set(new) - set(old)
-                    if font_file:
-                        st.info(f"✓ {old} → {new}：将使用上传的字体进行替换")
-                    else:
-                        st.warning(f"⚠️ {old} → {new}：新增字符 {diff}，建议上传字体文件")
 
 st.markdown("---")
 st.markdown("### 4️⃣ 开始替换")
@@ -131,67 +114,71 @@ can_process = (
     new_numbers and 
     len(old_numbers) == len(new_numbers) and
     all(validate_class_number(n) for n in old_numbers) and
-    all(validate_class_number(n) for n in new_numbers)
+    all(validate_class_number(n) for n in new_numbers) and
+    font_file is not None
 )
 
+if not font_file and uploaded_files:
+    st.warning("⚠️ 请上传字体文件")
 
-def replace_text_direct(doc, page, old_text, new_text):
-    """
-    方法1：直接修改PDF内容流中的文本
-    这是最干净的方式，不会有任何色块或痕迹
-    """
+
+def get_background_color(page, rect, exclude_rect=None):
+    """获取矩形区域的背景色"""
+    # 扩大采样区域
+    sample_rects = [
+        pymupdf.Rect(rect.x0 - 10, rect.y0 - 10, rect.x0 - 5, rect.y0 - 5),  # 左上
+        pymupdf.Rect(rect.x1 + 5, rect.y0 - 10, rect.x1 + 10, rect.y0 - 5),  # 右上
+        pymupdf.Rect(rect.x0 - 10, rect.y1 + 5, rect.x0 - 5, rect.y1 + 10),  # 左下
+        pymupdf.Rect(rect.x1 + 5, rect.y1 + 5, rect.x1 + 10, rect.y1 + 10),  # 右下
+        pymupdf.Rect(rect.x0 - 10, rect.y0, rect.x0 - 5, rect.y1),  # 左
+        pymupdf.Rect(rect.x1 + 5, rect.y0, rect.x1 + 10, rect.y1),  # 右
+    ]
+    
+    colors = []
+    for sr in sample_rects:
+        # 确保在页面内
+        if sr.x0 < 0 or sr.y0 < 0 or sr.x1 > page.rect.width or sr.y1 > page.rect.height:
+            continue
+        try:
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), clip=sr)
+            # 取中心点颜色
+            cx, cy = pix.width // 2, pix.height // 2
+            pixel = pix.pixel(cx, cy)
+            if len(pixel) >= 3:
+                colors.append((pixel[0]/255, pixel[1]/255, pixel[2]/255))
+        except:
+            continue
+    
+    if colors:
+        # 取中位数，避免极端值
+        r_sorted = sorted([c[0] for c in colors])
+        g_sorted = sorted([c[1] for c in colors])
+        b_sorted = sorted([c[2] for c in colors])
+        mid = len(colors) // 2
+        return (r_sorted[mid], g_sorted[mid], b_sorted[mid])
+    
+    return (0.8, 0.2, 0.2)  # 默认红色
+
+
+def replace_text_overlay(doc, page, old_text, new_text, font_buffer, font_name):
+    """覆盖方式替换文字"""
     replacements = 0
     
-    try:
-        # 获取页面的所有内容流
-        for xref in page.get_contents():
-            # 读取原始内容流
-            content = doc.xref_stream(xref)
-            
-            if not isinstance(content, bytes):
-                continue
-            
-            # 尝试不同的编码方式
-            for encoding in ['latin-1', 'utf-8', 'cp1252']:
-                try:
-                    content_str = content.decode(encoding)
-                    
-                    if old_text in content_str:
-                        # 直接替换文本
-                        new_content = content_str.replace(old_text, new_text)
-                        doc.update_stream(xref, new_content.encode(encoding))
-                        replacements += content_str.count(old_text)
-                        break
-                        
-                except (UnicodeDecodeError, UnicodeEncodeError):
-                    continue
-                    
-    except Exception as e:
-        print(f"直接替换出错: {e}")
-    
-    return replacements
-
-
-def replace_with_overlay(doc, page, old_text, new_text, font_buffer=None, font_name=None):
-    """
-    方法2：覆盖重写（仅当方法1失败时使用）
-    精确定位班号位置，只覆盖班号本身
-    """
-    replacements = 0
-    
-    # 精确搜索班号位置
+    # 搜索所有班号位置
     instances = page.search_for(old_text)
     
     if not instances:
         return 0
     
-    for rect in instances:
+    st.info(f"  找到 {len(instances)} 处 '{old_text}'")
+    
+    for i, rect in enumerate(instances):
         try:
-            # 获取该位置的文本样式
+            # 获取文本样式
             text_info = page.get_text("dict", clip=rect)
             
             font_size = 12
-            text_color = (1, 1, 1)  # 默认白色
+            text_color = (1, 1, 1)
             
             for block in text_info.get("blocks", []):
                 if "lines" in block:
@@ -205,79 +192,40 @@ def replace_with_overlay(doc, page, old_text, new_text, font_buffer=None, font_n
                                 b = (color & 0xFF) / 255.0
                                 text_color = (r, g, b)
             
-            # 方法2A：使用矩形覆盖 + 插入新文字
-            # 但这次我们用更智能的方式：获取背景色
+            # 获取背景色
+            bg_color = get_background_color(page, rect)
             
-            # 获取班号周围的背景色
-            bg_rect = pymupdf.Rect(rect.x0 - 5, rect.y0 - 5, rect.x1 + 5, rect.y1 + 5)
-            bg_samples = []
-            
-            # 采样背景色
-            for dx in [-3, 0, 3]:
-                for dy in [-3, 0, 3]:
-                    if dx == 0 and dy == 0:
-                        continue
-                    sample_rect = pymupdf.Rect(
-                        rect.x0 + dx - 2,
-                        rect.y0 + dy - 2,
-                        rect.x0 + dx + 2,
-                        rect.y0 + dy + 2
-                    )
-                    # 确保采样区域在页面内
-                    if sample_rect.x0 >= 0 and sample_rect.y0 >= 0:
-                        try:
-                            pix = page.get_pixmap(matrix=pymupdf.Matrix(1, 1), clip=sample_rect)
-                            if pix.n >= 3:
-                                # 取中心像素
-                                cx, cy = pix.width // 2, pix.height // 2
-                                pixel = pix.pixel(cx, cy)
-                                bg_samples.append((pixel[0]/255, pixel[1]/255, pixel[2]/255))
-                        except:
-                            pass
-            
-            # 计算平均背景色
-            if bg_samples:
-                bg_color = tuple(sum(c[i] for c in bg_samples) / len(bg_samples) for i in range(3))
-            else:
-                bg_color = (0.8, 0.2, 0.2)  # 默认红色
-            
-            # 绘制背景（稍微缩小一点，避免覆盖到"班"字）
-            bg_rect_inner = pymupdf.Rect(rect.x0 + 1, rect.y0 + 1, rect.x1 - 1, rect.y1 - 1)
-            page.draw_rect(bg_rect_inner, color=bg_color, fill=bg_color)
+            # 绘制背景矩形覆盖原文字
+            # 稍微扩大一点确保完全覆盖
+            cover_rect = pymupdf.Rect(
+                rect.x0 - 1,
+                rect.y0 - 1,
+                rect.x1 + 1,
+                rect.y1 + 1
+            )
+            page.draw_rect(cover_rect, color=bg_color, fill=bg_color)
             
             # 插入新文字
-            if font_buffer and font_name:
-                try:
-                    page.insert_font(fontname=font_name, fontbuffer=font_buffer)
-                    page.insert_text(
-                        (rect.x0 + 2, rect.y1 - 3),
-                        new_text,
-                        fontname=font_name,
-                        fontsize=font_size,
-                        color=text_color
-                    )
-                except:
-                    # 使用内置字体
-                    page.insert_text(
-                        (rect.x0 + 2, rect.y1 - 3),
-                        new_text,
-                        fontname="helv",
-                        fontsize=font_size,
-                        color=text_color
-                    )
-            else:
-                page.insert_text(
-                    (rect.x0 + 2, rect.y1 - 3),
-                    new_text,
-                    fontname="helv",
-                    fontsize=font_size,
-                    color=text_color
-                )
+            # 注册字体
+            page.insert_font(fontname=font_name, fontbuffer=font_buffer)
+            
+            # 计算插入位置（基线位置）
+            insert_x = rect.x0
+            insert_y = rect.y1 - font_size * 0.2  # 基线位置
+            
+            page.insert_text(
+                (insert_x, insert_y),
+                new_text,
+                fontname=font_name,
+                fontsize=font_size,
+                color=text_color
+            )
             
             replacements += 1
+            st.text(f"    ✓ 第{i+1}处已替换")
             
         except Exception as e:
-            print(f"覆盖重写出错: {e}")
+            st.text(f"    ✗ 第{i+1}处替换失败: {str(e)}")
             continue
     
     return replacements
@@ -294,11 +242,9 @@ if st.button("🚀 开始替换", disabled=not can_process, type="primary"):
     
     replace_map = dict(zip(old_numbers, new_numbers))
     
-    font_buffer = None
-    font_name = None
-    if font_file:
-        font_buffer = font_file.read()
-        font_name = os.path.splitext(font_file.name)[0]
+    # 读取字体
+    font_buffer = font_file.read()
+    font_name = "custom_font"
     
     for i, uploaded_file in enumerate(uploaded_files):
         try:
@@ -308,37 +254,25 @@ if st.button("🚀 开始替换", disabled=not can_process, type="primary"):
             doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
             
             total_replacements = 0
-            method_used = []
             
             for page_num, page in enumerate(doc):
+                st.text(f"处理第 {page_num + 1} 页...")
                 for old_num, new_num in replace_map.items():
-                    # 优先方法1：直接修改内容流
-                    reps = replace_text_direct(doc, page, old_num, new_num)
-                    
-                    if reps > 0:
-                        method_used.append(f"第{page_num+1}页:直接修改")
-                        total_replacements += reps
-                    else:
-                        # 方法2：覆盖重写（如果上传了字体）
-                        if font_buffer:
-                            reps = replace_with_overlay(doc, page, old_num, new_num, font_buffer, font_name)
-                            if reps > 0:
-                                method_used.append(f"第{page_num+1}页:覆盖重写")
-                                total_replacements += reps
+                    reps = replace_text_overlay(doc, page, old_num, new_num, font_buffer, font_name)
+                    total_replacements += reps
             
             original_name = uploaded_file.name
             new_name = original_name[:-4] + "_replaced.pdf" if original_name.endswith(".pdf") else original_name + "_replaced.pdf"
             
             output_buffer = io.BytesIO()
-            doc.save(output_buffer, garbage=4, deflate=True, clean=True)
+            doc.save(output_buffer, garbage=4, deflate=True)
             doc.close()
             
             output_buffer.seek(0)
             processed_files.append({
                 "name": new_name,
                 "data": output_buffer,
-                "replacements": total_replacements,
-                "method": ", ".join(method_used) if method_used else "未替换"
+                "replacements": total_replacements
             })
             
             success_count += 1
@@ -364,37 +298,33 @@ if st.button("🚀 开始替换", disabled=not can_process, type="primary"):
         st.metric("总替换次数", total_reps)
     
     if processed_files:
-        with st.expander("📋 查看处理详情"):
-            for f in processed_files:
-                st.text(f"✅ {f['name']} - 替换了 {f['replacements']} 处 ({f['method']})")
-    
-    if len(processed_files) == 1:
-        st.download_button(
-            label="📥 下载处理后的文件",
-            data=processed_files[0]["data"],
-            file_name=processed_files[0]["name"],
-            mime="application/pdf"
-        )
-    elif len(processed_files) > 1:
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-            for f in processed_files:
-                zip_file.writestr(f["name"], f["data"].getvalue())
-        
-        zip_buffer.seek(0)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        zip_name = f"班号替换结果_{timestamp}.zip"
-        
-        st.download_button(
-            label="📥 下载所有文件（ZIP压缩包）",
-            data=zip_buffer,
-            file_name=zip_name,
-            mime="application/zip"
-        )
+        if len(processed_files) == 1:
+            st.download_button(
+                label="📥 下载处理后的文件",
+                data=processed_files[0]["data"],
+                file_name=processed_files[0]["name"],
+                mime="application/pdf"
+            )
+        elif len(processed_files) > 1:
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                for f in processed_files:
+                    zip_file.writestr(f["name"], f["data"].getvalue())
+            
+            zip_buffer.seek(0)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            zip_name = f"班号替换结果_{timestamp}.zip"
+            
+            st.download_button(
+                label="📥 下载所有文件（ZIP压缩包）",
+                data=zip_buffer,
+                file_name=zip_name,
+                mime="application/zip"
+            )
 
 st.markdown("---")
 st.markdown("""
 <div style="text-align: center; color: #888; font-size: 12px;">
-    Made with ❤️ by 微酱 | v10.0 直接操作文本版
+    Made with ❤️ by 微酱 | v11.0 稳定覆盖版
 </div>
 """, unsafe_allow_html=True)
