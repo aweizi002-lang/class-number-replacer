@@ -117,7 +117,10 @@ if old_numbers and new_numbers:
                     st.info(f"✓ {old} → {new}：字符完全兼容，直接替换无痕迹")
                 else:
                     diff = set(new) - set(old)
-                    st.warning(f"⚠️ {old} → {new}：新增字符 {diff}，可能需要字体支持")
+                    if font_file:
+                        st.info(f"✓ {old} → {new}：将使用上传的字体进行替换")
+                    else:
+                        st.warning(f"⚠️ {old} → {new}：新增字符 {diff}，建议上传字体文件")
 
 st.markdown("---")
 st.markdown("### 4️⃣ 开始替换")
