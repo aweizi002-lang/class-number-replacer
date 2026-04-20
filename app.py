@@ -1,6 +1,6 @@
 """
-班号批量替换工具 v5 - 支持自定义字体
-功能：智能文本替换，支持上传自定义字体确保完美显示
+班号批量替换工具 v6 - 自动背景色检测
+功能：智能检测背景色，完美融入原设计
 作者：微酱
 """
 
@@ -11,7 +11,7 @@ import io
 import re
 import os
 from datetime import datetime
-import tempfile
+from collections import Counter
 
 st.set_page_config(
     page_title="班号批量替换工具",
@@ -25,20 +25,18 @@ st.markdown("---")
 with st.expander("📖 使用说明"):
     st.markdown("""
     ### 功能说明
-    智能替换PDF中的班号文本，支持自定义字体
+    智能替换PDF中的班号文本，自动检测背景色，完美融入原设计
     
     ### 支持的班号格式
     - 3-10位字母或数字的任意组合
-    - 例如：B260830、C12345、ABC123
     
-    ### 字体设置
-    - **推荐上传字体**：上传与原PDF相同的字体文件（如 HarmonyOS Sans SC）
-    - 字体格式支持：TTF、OTF
-    - 上传字体后可支持任意字符，不会出现显示异常
+    ### 字体设置（推荐）
+    - 上传与原PDF相同的字体文件（如 HarmonyOS Sans SC）
+    - 确保任意字符都能正常显示
     
-    ### 如果不上传字体
-    - 工具会尝试使用PDF内嵌字体
-    - 如果新班号包含原字体没有的字符，可能显示为方框
+    ### 新增功能
+    - ✅ 自动检测背景色，不再有明显的白色色块
+    - ✅ 支持红色、深色等任意背景色
     """)
 
 st.markdown("### 1️⃣ 上传PDF文件")
@@ -58,7 +56,7 @@ st.markdown("### 2️⃣ 上传字体文件（可选但推荐）")
 font_file = st.file_uploader(
     "上传字体文件（TTF/OTF）",
     type=["ttf", "otf"],
-    help="上传与原PDF相同的字体，确保替换后显示正常。推荐上传 HarmonyOS Sans SC Regular 和 Bold。"
+    help="推荐上传 HarmonyOS Sans SC"
 )
 
 if font_file:
@@ -72,13 +70,13 @@ col1, col2 = st.columns(2)
 with col1:
     old_class_numbers = st.text_input(
         "旧班号（要被替换的）",
-        placeholder="如：B250675、ABC123、123456"
+        placeholder="如：B250675"
     )
 
 with col2:
     new_class_numbers = st.text_input(
         "新班号",
-        placeholder="如：B260830、ABC456、654321"
+        placeholder="如：B260830"
     )
 
 def parse_class_numbers(text):
@@ -110,10 +108,6 @@ if old_numbers and new_numbers:
         
         if not invalid_old and not invalid_new:
             st.success("✅ 班号格式正确")
-            
-            for old, new in zip(old_numbers, new_numbers):
-                if len(old) != len(new):
-                    st.warning(f"⚠️ {old}（{len(old)}位）→ {new}（{len(new)}位）：长度不一致")
 
 st.markdown("---")
 st.markdown("### 4️⃣ 开始替换")
@@ -127,10 +121,69 @@ can_process = (
     all(validate_class_number(n) for n in new_numbers)
 )
 
-def replace_text_with_font(page, old_text, new_text, font_buffer=None, font_name=None):
-    """使用指定字体替换文本"""
+def get_background_color(page, rect):
+    """智能检测背景色"""
+    try:
+        # 扩大一点采样区域，避免只取到文字边缘
+        margin = 2
+        sample_rect = pymupdf.Rect(
+            rect.x0 - margin,
+            rect.y0 - margin,
+            rect.x1 + margin,
+            rect.y1 + margin
+        )
+        
+        pix = page.get_pixmap(clip=sample_rect)
+        w, h = pix.width, pix.height
+        
+        if w == 0 or h == 0:
+            return (1, 1, 1)
+        
+        # 取四个角落的像素作为背景色样本
+        samples = []
+        corners = [(2, 2), (w-3, 2), (2, h-3), (w-3, h-3)]
+        
+        for x, y in corners:
+            if 0 <= x < w and 0 <= y < h:
+                pixel = pix.pixel(x, y)
+                if isinstance(pixel, (list, tuple)) and len(pixel) >= 3:
+                    samples.append(pixel[:3])
+        
+        if not samples:
+            return (1, 1, 1)
+        
+        # 找最常见的颜色
+        color_counts = Counter(tuple(s) for s in samples)
+        most_common = color_counts.most_common(1)[0][0]
+        
+        # 转换为0-1范围
+        return (most_common[0] / 255.0, most_common[1] / 255.0, most_common[2] / 255.0)
+        
+    except Exception as e:
+        return (1, 1, 1)
+
+def replace_text_smart(page, old_text, new_text):
+    """直接修改内容流（最无痕的方式）"""
     replacements = 0
-    bg_color = (1, 1, 1)
+    try:
+        for xref in page.get_contents():
+            content = page.parent.xref_stream(xref)
+            if isinstance(content, bytes):
+                try:
+                    content_str = content.decode('latin-1')
+                    if old_text in content_str:
+                        new_content = content_str.replace(old_text, new_text)
+                        page.parent.update_stream(xref, new_content.encode('latin-1'))
+                        replacements += content_str.count(old_text)
+                except:
+                    pass
+    except:
+        pass
+    return replacements
+
+def replace_text_with_font(page, old_text, new_text, font_buffer=None, font_name=None):
+    """使用指定字体替换文本，自动检测背景色"""
+    replacements = 0
     
     text_dict = page.get_text("dict")
     
@@ -149,16 +202,20 @@ def replace_text_with_font(page, old_text, new_text, font_buffer=None, font_name
                     size = span.get("size", 11)
                     origin = span.get("origin", (bbox[0], bbox[1]))
                     
+                    # 获取文本颜色
                     color = span.get("color", 0)
                     if isinstance(color, int):
                         r = ((color >> 16) & 0xFF) / 255.0
                         g = ((color >> 8) & 0xFF) / 255.0
                         b = (color & 0xFF) / 255.0
-                        color_tuple = (r, g, b)
+                        text_color = (r, g, b)
                     else:
-                        color_tuple = (0, 0, 0)
+                        text_color = (1, 1, 1)  # 白色文本
                     
-                    # 覆盖原文本
+                    # 🔥 关键：自动检测背景色
+                    bg_color = get_background_color(page, rect)
+                    
+                    # 用检测到的背景色覆盖原文本
                     shape = page.new_shape()
                     shape.draw_rect(rect)
                     shape.finish(fill=bg_color, color=bg_color)
@@ -166,25 +223,23 @@ def replace_text_with_font(page, old_text, new_text, font_buffer=None, font_name
                     
                     new_full_text = text.replace(old_text, new_text)
                     
-                    # 如果有上传字体，使用自定义字体
+                    # 使用上传的字体
                     if font_buffer and font_name:
                         try:
-                            # 插入字体到页面
-                            font_xref = page.insert_font(fontname=font_name, fontbuffer=font_buffer)
-                            # 使用自定义字体插入文本
+                            page.insert_font(fontname=font_name, fontbuffer=font_buffer)
                             page.insert_text(
                                 (bbox[0], origin[1]),
                                 new_full_text,
                                 fontname=font_name,
                                 fontsize=size,
-                                color=color_tuple
+                                color=text_color
                             )
                             replacements += 1
                             continue
-                        except Exception as e:
+                        except:
                             pass
                     
-                    # 如果没有字体或失败，尝试使用原字体
+                    # 备选：使用原字体
                     font = span.get("font", "helv")
                     try:
                         page.insert_text(
@@ -192,7 +247,7 @@ def replace_text_with_font(page, old_text, new_text, font_buffer=None, font_name
                             new_full_text,
                             fontname=font,
                             fontsize=size,
-                            color=color_tuple
+                            color=text_color
                         )
                         replacements += 1
                     except:
@@ -203,32 +258,13 @@ def replace_text_with_font(page, old_text, new_text, font_buffer=None, font_name
                                     new_full_text,
                                     fontname=fallback_font,
                                     fontsize=size,
-                                    color=color_tuple
+                                    color=text_color
                                 )
                                 replacements += 1
                                 break
                             except:
                                 continue
     
-    return replacements
-
-def replace_text_smart(page, old_text, new_text):
-    """直接修改PDF内容流（最无痕）"""
-    replacements = 0
-    try:
-        for xref in page.get_contents():
-            content = page.parent.xref_stream(xref)
-            if isinstance(content, bytes):
-                try:
-                    content_str = content.decode('latin-1')
-                    if old_text in content_str:
-                        new_content = content_str.replace(old_text, new_text)
-                        page.parent.update_stream(xref, new_content.encode('latin-1'))
-                        replacements += content_str.count(old_text)
-                except:
-                    pass
-    except:
-        pass
     return replacements
 
 if st.button("🚀 开始替换", disabled=not can_process, type="primary"):
@@ -261,14 +297,14 @@ if st.button("🚀 开始替换", disabled=not can_process, type="primary"):
             
             for page in doc:
                 for old_num, new_num in replace_map.items():
-                    # 优先使用内容流替换（最无痕）
-                    if not font_file:  # 只有没上传字体时才尝试
+                    # 优先尝试直接修改内容流（最无痕）
+                    if not font_file:
                         reps = replace_text_smart(page, old_num, new_num)
                         if reps > 0:
                             total_replacements += reps
                             continue
                     
-                    # 使用字体替换
+                    # 使用字体替换（自动检测背景色）
                     reps = replace_text_with_font(page, old_num, new_num, font_buffer, font_name)
                     total_replacements += reps
             
@@ -340,6 +376,6 @@ if st.button("🚀 开始替换", disabled=not can_process, type="primary"):
 st.markdown("---")
 st.markdown("""
 <div style="text-align: center; color: #888; font-size: 12px;">
-    Made with ❤️ by 微酱 | v5.0 支持自定义字体版
+    Made with ❤️ by 微酱 | v6.0 自动背景色检测版
 </div>
 """, unsafe_allow_html=True)
