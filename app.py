@@ -1,6 +1,6 @@
 """
-班号批量替换工具 v6 - 自动背景色检测
-功能：智能检测背景色，完美融入原设计
+班号批量替换工具 v7.1 - 智能纹理填充（避免覆盖其他文字）
+功能：智能检测背景纹理，完美融入原设计，保护周围文字
 作者：微酱
 """
 
@@ -25,18 +25,15 @@ st.markdown("---")
 with st.expander("📖 使用说明"):
     st.markdown("""
     ### 功能说明
-    智能替换PDF中的班号文本，自动检测背景色，完美融入原设计
+    智能替换PDF中的班号文本，自动处理背景纹理
     
-    ### 支持的班号格式
-    - 3-10位字母或数字的任意组合
+    ### 核心优化
+    - ✅ 自动检测背景纹理，智能填充
+    - ✅ 支持渐变、纹理等复杂背景
+    - ✅ 替换效果更自然，无生硬色块
     
-    ### 字体设置（推荐）
-    - 上传与原PDF相同的字体文件（如 HarmonyOS Sans SC）
-    - 确保任意字符都能正常显示
-    
-    ### 新增功能
-    - ✅ 自动检测背景色，不再有明显的白色色块
-    - ✅ 支持红色、深色等任意背景色
+    ### 推荐上传字体
+    上传 HarmonyOS Sans SC 可确保任意字符正常显示
     """)
 
 st.markdown("### 1️⃣ 上传PDF文件")
@@ -121,11 +118,84 @@ can_process = (
     all(validate_class_number(n) for n in new_numbers)
 )
 
-def get_background_color(page, rect):
-    """智能检测背景色"""
+def fill_with_texture(page, rect, all_text_rects):
+    """用周围纹理智能填充区域，避免覆盖其他文字"""
     try:
-        # 扩大一点采样区域，避免只取到文字边缘
-        margin = 2
+        # 检查周围区域是否有其他文字
+        margin = 5  # 扩大一点范围
+        
+        # 扩大rect用于采样
+        expanded_rect = pymupdf.Rect(
+            rect.x0 - margin,
+            rect.y0 - margin,
+            rect.x1 + margin,
+            rect.y1 + margin
+        )
+        
+        # 找一个没有文字的纯净区域来采样
+        def find_clean_area(base_rect, direction, width):
+            """在指定方向找一个没有文字的区域"""
+            if direction == "left":
+                sample_rect = pymupdf.Rect(
+                    base_rect.x0 - width,
+                    base_rect.y0,
+                    base_rect.x0,
+                    base_rect.y1
+                )
+            elif direction == "right":
+                sample_rect = pymupdf.Rect(
+                    base_rect.x1,
+                    base_rect.y0,
+                    base_rect.x1 + width,
+                    base_rect.y1
+                )
+            elif direction == "top":
+                sample_rect = pymupdf.Rect(
+                    base_rect.x0,
+                    base_rect.y0 - width,
+                    base_rect.x1,
+                    base_rect.y0
+                )
+            else:  # bottom
+                sample_rect = pymupdf.Rect(
+                    base_rect.x0,
+                    base_rect.y1,
+                    base_rect.x1,
+                    base_rect.y1 + width
+                )
+            
+            # 检查这个区域是否与其他文字重叠
+            for text_rect in all_text_rects:
+                if sample_rect.intersects(text_rect):
+                    return None  # 有重叠，不能用
+            
+            return sample_rect
+        
+        # 尝试从各个方向找纯净区域
+        sample_width = max(20, int((rect.x1 - rect.x0) * 0.3))
+        
+        for direction in ["left", "right", "top", "bottom"]:
+            sample_rect = find_clean_area(rect, direction, sample_width)
+            if sample_rect:
+                try:
+                    pix = page.get_pixmap(clip=sample_rect)
+                    if pix.width > 0 and pix.height > 0:
+                        # 将纹理粘贴到目标区域
+                        img = pix.tobytes("png")
+                        page.insert_image(rect, stream=img, keep_proportion=False)
+                        return True
+                except:
+                    continue
+        
+    except Exception as e:
+        pass
+    
+    return False
+
+def get_avg_background_color(page, rect):
+    """获取背景平均颜色（作为备选）"""
+    try:
+        margin = 5
         sample_rect = pymupdf.Rect(
             rect.x0 - margin,
             rect.y0 - margin,
@@ -139,12 +209,16 @@ def get_background_color(page, rect):
         if w == 0 or h == 0:
             return (1, 1, 1)
         
-        # 取四个角落的像素作为背景色样本
+        # 取边缘像素的平均值
         samples = []
-        corners = [(2, 2), (w-3, 2), (2, h-3), (w-3, h-3)]
+        for x in range(0, w, max(1, w//10)):
+            for y in [0, h-1]:
+                pixel = pix.pixel(x, y)
+                if isinstance(pixel, (list, tuple)) and len(pixel) >= 3:
+                    samples.append(pixel[:3])
         
-        for x, y in corners:
-            if 0 <= x < w and 0 <= y < h:
+        for y in range(0, h, max(1, h//10)):
+            for x in [0, w-1]:
                 pixel = pix.pixel(x, y)
                 if isinstance(pixel, (list, tuple)) and len(pixel) >= 3:
                     samples.append(pixel[:3])
@@ -152,18 +226,18 @@ def get_background_color(page, rect):
         if not samples:
             return (1, 1, 1)
         
-        # 找最常见的颜色
-        color_counts = Counter(tuple(s) for s in samples)
-        most_common = color_counts.most_common(1)[0][0]
+        # 计算平均值
+        avg_r = sum(s[0] for s in samples) / len(samples)
+        avg_g = sum(s[1] for s in samples) / len(samples)
+        avg_b = sum(s[2] for s in samples) / len(samples)
         
-        # 转换为0-1范围
-        return (most_common[0] / 255.0, most_common[1] / 255.0, most_common[2] / 255.0)
+        return (avg_r / 255.0, avg_g / 255.0, avg_b / 255.0)
         
-    except Exception as e:
+    except:
         return (1, 1, 1)
 
 def replace_text_smart(page, old_text, new_text):
-    """直接修改内容流（最无痕的方式）"""
+    """直接修改内容流（最无痕）"""
     replacements = 0
     try:
         for xref in page.get_contents():
@@ -181,8 +255,22 @@ def replace_text_smart(page, old_text, new_text):
         pass
     return replacements
 
-def replace_text_with_font(page, old_text, new_text, font_buffer=None, font_name=None):
-    """使用指定字体替换文本，自动检测背景色"""
+def get_all_text_rects(page):
+    """获取页面上所有文本的位置"""
+    rects = []
+    text_dict = page.get_text("dict")
+    for block in text_dict.get("blocks", []):
+        if "lines" not in block:
+            continue
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                bbox = span.get("bbox")
+                if bbox:
+                    rects.append(pymupdf.Rect(bbox))
+    return rects
+
+def replace_text_with_font(page, old_text, new_text, font_buffer=None, font_name=None, all_text_rects=None):
+    """使用指定字体替换文本，智能处理背景"""
     replacements = 0
     
     text_dict = page.get_text("dict")
@@ -210,16 +298,20 @@ def replace_text_with_font(page, old_text, new_text, font_buffer=None, font_name
                         b = (color & 0xFF) / 255.0
                         text_color = (r, g, b)
                     else:
-                        text_color = (1, 1, 1)  # 白色文本
+                        text_color = (1, 1, 1)
                     
-                    # 🔥 关键：自动检测背景色
-                    bg_color = get_background_color(page, rect)
+                    # 🔥 核心：智能填充背景（避免覆盖其他文字）
+                    texture_filled = False
+                    if all_text_rects:
+                        texture_filled = fill_with_texture(page, rect, all_text_rects)
                     
-                    # 用检测到的背景色覆盖原文本
-                    shape = page.new_shape()
-                    shape.draw_rect(rect)
-                    shape.finish(fill=bg_color, color=bg_color)
-                    shape.commit()
+                    if not texture_filled:
+                        # 纹理填充失败，使用平均背景色
+                        bg_color = get_avg_background_color(page, rect)
+                        shape = page.new_shape()
+                        shape.draw_rect(rect)
+                        shape.finish(fill=bg_color, color=bg_color)
+                        shape.commit()
                     
                     new_full_text = text.replace(old_text, new_text)
                     
@@ -278,13 +370,11 @@ if st.button("🚀 开始替换", disabled=not can_process, type="primary"):
     
     replace_map = dict(zip(old_numbers, new_numbers))
     
-    # 处理字体文件
     font_buffer = None
     font_name = None
     if font_file:
         font_buffer = font_file.read()
         font_name = os.path.splitext(font_file.name)[0]
-        status_text.text(f"已加载字体：{font_name}")
     
     for i, uploaded_file in enumerate(uploaded_files):
         try:
@@ -296,16 +386,19 @@ if st.button("🚀 开始替换", disabled=not can_process, type="primary"):
             total_replacements = 0
             
             for page in doc:
+                # 先获取页面上所有文本的位置，避免纹理填充时覆盖其他文字
+                all_text_rects = get_all_text_rects(page)
+                
                 for old_num, new_num in replace_map.items():
-                    # 优先尝试直接修改内容流（最无痕）
+                    # 优先直接修改内容流
                     if not font_file:
                         reps = replace_text_smart(page, old_num, new_num)
                         if reps > 0:
                             total_replacements += reps
                             continue
                     
-                    # 使用字体替换（自动检测背景色）
-                    reps = replace_text_with_font(page, old_num, new_num, font_buffer, font_name)
+                    # 智能纹理填充替换
+                    reps = replace_text_with_font(page, old_num, new_num, font_buffer, font_name, all_text_rects)
                     total_replacements += reps
             
             original_name = uploaded_file.name
@@ -376,6 +469,6 @@ if st.button("🚀 开始替换", disabled=not can_process, type="primary"):
 st.markdown("---")
 st.markdown("""
 <div style="text-align: center; color: #888; font-size: 12px;">
-    Made with ❤️ by 微酱 | v6.0 自动背景色检测版
+    Made with ❤️ by 微酱 | v7.1 智能纹理填充版
 </div>
 """, unsafe_allow_html=True)
