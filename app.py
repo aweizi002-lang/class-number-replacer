@@ -1,6 +1,6 @@
 """
-班号批量替换工具 v8 - 精准替换版
-功能：只覆盖班号本身，不影响周围任何内容
+班号批量替换工具 v9 - 最精准版
+功能：只替换班号，绝对不影响其他内容
 作者：微酱
 """
 
@@ -23,16 +23,17 @@ st.markdown("---")
 
 with st.expander("📖 使用说明"):
     st.markdown("""
-    ### 核心优化
-    - ✅ 精准只覆盖班号文字本身
-    - ✅ 不影响周围任何文字和图案
-    - ✅ 智能背景色匹配
+    ### 核心原理
+    1. **优先级1**：直接修改PDF内部文本内容（完全无痕）
+    2. **优先级2**：使用PDF重标注(redact)精准替换
     
-    ### 推荐上传字体
-    上传 HarmonyOS Sans SC 可确保任意字符正常显示
+    ### 最佳效果
+    - 新旧班号字符相同 → 完美无痕（如 B250728 → B260830）
+    - 上传字体文件 → 支持任意字符
     
-    ### 最佳效果建议
-    如果新旧班号字符相同（如 B250728 → B260830），效果最完美
+    ### 注意
+    - 请确保上传正确的字体文件
+    - 如果字符兼容，推荐不上传字体，让系统直接修改
     """)
 
 st.markdown("### 1️⃣ 上传PDF文件")
@@ -47,12 +48,12 @@ if uploaded_files:
     st.success(f"已上传 {len(uploaded_files)} 个文件")
 
 st.markdown("---")
-st.markdown("### 2️⃣ 上传字体文件（可选但推荐）")
+st.markdown("### 2️⃣ 上传字体文件（可选）")
 
 font_file = st.file_uploader(
     "上传字体文件（TTF/OTF）",
     type=["ttf", "otf"],
-    help="推荐上传 HarmonyOS Sans SC"
+    help="如果新旧班号字符不同，需要上传字体"
 )
 
 if font_file:
@@ -65,7 +66,7 @@ col1, col2 = st.columns(2)
 
 with col1:
     old_class_numbers = st.text_input(
-        "旧班号（要被替换的）",
+        "旧班号",
         placeholder="如：B250675"
     )
 
@@ -98,17 +99,16 @@ if old_numbers and new_numbers:
         invalid_new = [n for n in new_numbers if not validate_class_number(n)]
         
         if invalid_old:
-            st.error(f"❌ 旧班号格式错误：{', '.join(invalid_old)}")
+            st.error(f"❌ 旧班号格式错误")
         if invalid_new:
-            st.error(f"❌ 新班号格式错误：{', '.join(invalid_new)}")
+            st.error(f"❌ 新班号格式错误")
         
         if not invalid_old and not invalid_new:
             st.success("✅ 班号格式正确")
             
-            # 字符兼容性提示
             for old, new in zip(old_numbers, new_numbers):
                 if set(old) == set(new):
-                    st.info(f"✓ {old} → {new}：字符完全兼容，可完美无痕替换")
+                    st.info(f"✓ {old} → {new}：字符兼容，可无痕替换")
 
 st.markdown("---")
 st.markdown("### 4️⃣ 开始替换")
@@ -122,8 +122,8 @@ can_process = (
     all(validate_class_number(n) for n in new_numbers)
 )
 
-def replace_text_directly(page, old_text, new_text):
-    """直接修改PDF内容流中的文本（最无痕）"""
+def replace_in_content_stream(page, old_text, new_text):
+    """方法1：直接修改PDF内容流（最无痕）"""
     replacements = 0
     try:
         for xref in page.get_contents():
@@ -141,135 +141,75 @@ def replace_text_directly(page, old_text, new_text):
         pass
     return replacements
 
-def get_precise_bg_color(page, rect):
-    """精准获取背景色（只从班号文字边缘取样）"""
-    try:
-        # 精确截取班号区域
-        pix = page.get_pixmap(clip=rect)
-        w, h = pix.width, pix.height
-        
-        if w < 2 or h < 2:
-            return (1, 1, 1)
-        
-        # 只取最边缘的像素（上下左右各1像素）
-        edge_pixels = []
-        
-        # 上边和下边
-        for x in range(w):
-            for y in [0, h-1]:
-                pixel = pix.pixel(x, y)
-                if isinstance(pixel, (list, tuple)) and len(pixel) >= 3:
-                    edge_pixels.append(pixel[:3])
-        
-        # 左边和右边
-        for y in range(h):
-            for x in [0, w-1]:
-                pixel = pix.pixel(x, y)
-                if isinstance(pixel, (list, tuple)) and len(pixel) >= 3:
-                    edge_pixels.append(pixel[:3])
-        
-        if not edge_pixels:
-            return (1, 1, 1)
-        
-        # 找最常见的边缘颜色作为背景色
-        from collections import Counter
-        color_counts = Counter(tuple(p) for p in edge_pixels)
-        most_common = color_counts.most_common(1)[0][0]
-        
-        return (most_common[0] / 255.0, most_common[1] / 255.0, most_common[2] / 255.0)
-        
-    except:
-        return (1, 1, 1)
-
-def replace_text_precise(page, old_text, new_text, font_buffer=None, font_name=None):
-    """精准替换：只覆盖班号本身"""
+def replace_with_redact(page, old_text, new_text, font_buffer=None, font_name=None):
+    """方法2：使用PDF重标注精准替换"""
     replacements = 0
     
-    text_dict = page.get_text("dict")
+    # 搜索班号位置
+    instances = page.search_for(old_text)
     
-    for block in text_dict.get("blocks", []):
-        if "lines" not in block:
+    if not instances:
+        return 0
+    
+    for rect in instances:
+        try:
+            # 获取该位置的文本信息
+            text_info = page.get_text("dict", clip=rect)
+            
+            # 提取样式
+            font_size = 11
+            text_color = (1, 1, 1)
+            
+            for block in text_info.get("blocks", []):
+                if "lines" in block:
+                    for line in block["lines"]:
+                        for span in line["spans"]:
+                            font_size = span.get("size", 11)
+                            color = span.get("color", 0)
+                            if isinstance(color, int):
+                                r = ((color >> 16) & 0xFF) / 255.0
+                                g = ((color >> 8) & 0xFF) / 255.0
+                                b = (color & 0xFF) / 255.0
+                                text_color = (r, g, b)
+            
+            # 添加重标注（只标记班号位置）
+            page.add_redact_annot(rect)
+            
+            # 应用重标注
+            page.apply_redactions()
+            
+            # 在原位置插入新文本
+            if font_buffer and font_name:
+                try:
+                    page.insert_font(fontname=font_name, fontbuffer=font_buffer)
+                    page.insert_text(
+                        (rect.x0, rect.y1 - 2),
+                        new_text,
+                        fontname=font_name,
+                        fontsize=font_size,
+                        color=text_color
+                    )
+                except:
+                    page.insert_text(
+                        (rect.x0, rect.y1 - 2),
+                        new_text,
+                        fontname="helv",
+                        fontsize=font_size,
+                        color=text_color
+                    )
+            else:
+                page.insert_text(
+                    (rect.x0, rect.y1 - 2),
+                    new_text,
+                    fontname="helv",
+                    fontsize=font_size,
+                    color=text_color
+                )
+            
+            replacements += 1
+            
+        except Exception as e:
             continue
-        for line in block.get("lines", []):
-            for span in line.get("spans", []):
-                text = span.get("text", "")
-                
-                # 精确匹配：只替换班号本身
-                if text == old_text or (old_text in text and len(text) < 20):
-                    bbox = span.get("bbox")
-                    if not bbox:
-                        continue
-                    
-                    rect = pymupdf.Rect(bbox)
-                    size = span.get("size", 11)
-                    origin = span.get("origin", (bbox[0], bbox[1]))
-                    
-                    # 获取文本颜色
-                    color = span.get("color", 0)
-                    if isinstance(color, int):
-                        r = ((color >> 16) & 0xFF) / 255.0
-                        g = ((color >> 8) & 0xFF) / 255.0
-                        b = (color & 0xFF) / 255.0
-                        text_color = (r, g, b)
-                    else:
-                        text_color = (1, 1, 1)
-                    
-                    # 🔥 核心：精准背景色 + 只覆盖班号区域
-                    bg_color = get_precise_bg_color(page, rect)
-                    
-                    # 用精准背景色覆盖
-                    shape = page.new_shape()
-                    shape.draw_rect(rect)
-                    shape.finish(fill=bg_color, color=bg_color)
-                    shape.commit()
-                    
-                    # 确定最终文本
-                    if text == old_text:
-                        final_text = new_text
-                    else:
-                        final_text = text.replace(old_text, new_text)
-                    
-                    # 使用上传的字体
-                    if font_buffer and font_name:
-                        try:
-                            page.insert_font(fontname=font_name, fontbuffer=font_buffer)
-                            page.insert_text(
-                                (bbox[0], origin[1]),
-                                final_text,
-                                fontname=font_name,
-                                fontsize=size,
-                                color=text_color
-                            )
-                            replacements += 1
-                            continue
-                        except:
-                            pass
-                    
-                    # 备选：使用原字体
-                    font = span.get("font", "helv")
-                    try:
-                        page.insert_text(
-                            (bbox[0], origin[1]),
-                            final_text,
-                            fontname=font,
-                            fontsize=size,
-                            color=text_color
-                        )
-                        replacements += 1
-                    except:
-                        for fallback_font in ["helv", "arial", "times-roman"]:
-                            try:
-                                page.insert_text(
-                                    (bbox[0], origin[1]),
-                                    final_text,
-                                    fontname=fallback_font,
-                                    fontsize=size,
-                                    color=text_color
-                                )
-                                replacements += 1
-                                break
-                            except:
-                                continue
     
     return replacements
 
@@ -301,12 +241,12 @@ if st.button("🚀 开始替换", disabled=not can_process, type="primary"):
             
             for page in doc:
                 for old_num, new_num in replace_map.items():
-                    # 方法1：直接修改内容流（如果字符兼容，最完美）
-                    reps = replace_text_directly(page, old_num, new_num)
+                    # 优先方法1：直接修改内容流
+                    reps = replace_in_content_stream(page, old_num, new_num)
                     
                     if reps == 0:
-                        # 方法2：精准覆盖替换
-                        reps = replace_text_precise(page, old_num, new_num, font_buffer, font_name)
+                        # 方法2：重标注替换
+                        reps = replace_with_redact(page, old_num, new_num, font_buffer, font_name)
                     
                     total_replacements += reps
             
@@ -378,6 +318,6 @@ if st.button("🚀 开始替换", disabled=not can_process, type="primary"):
 st.markdown("---")
 st.markdown("""
 <div style="text-align: center; color: #888; font-size: 12px;">
-    Made with ❤️ by 微酱 | v8.0 精准替换版
+    Made with ❤️ by 微酱 | v9.0 最精准版
 </div>
 """, unsafe_allow_html=True)
