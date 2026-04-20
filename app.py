@@ -164,26 +164,42 @@ def replace_text_overlay(doc, page, old_text, new_text, font_buffer, font_name):
     """覆盖方式替换文字"""
     replacements = 0
     
-    # 搜索所有班号位置
-    instances = page.search_for(old_text)
+    # 搜索班号（可能带"班"字）
+    # 尝试多种形式：纯班号、班号+"班"
+    search_patterns = [old_text, old_text + "班"]
+    all_instances = []
     
-    if not instances:
+    for pattern in search_patterns:
+        instances = page.search_for(pattern)
+        for rect in instances:
+            # 避免重复（如果搜索"B260758班"和"B260758"可能重叠）
+            is_dup = False
+            for existing_rect in all_instances:
+                if abs(rect.x0 - existing_rect.x0) < 5 and abs(rect.y0 - existing_rect.y0) < 5:
+                    is_dup = True
+                    break
+            if not is_dup:
+                all_instances.append(rect)
+    
+    if not all_instances:
         return 0
     
-    st.info(f"  找到 {len(instances)} 处 '{old_text}'")
+    st.info(f"  找到 {len(all_instances)} 处班号")
     
-    for i, rect in enumerate(instances):
+    for i, rect in enumerate(all_instances):
         try:
             # 获取文本样式
             text_info = page.get_text("dict", clip=rect)
             
             font_size = 12
             text_color = (1, 1, 1)
+            actual_text = ""
             
             for block in text_info.get("blocks", []):
                 if "lines" in block:
                     for line in block["lines"]:
                         for span in line["spans"]:
+                            actual_text = span.get("text", "")
                             font_size = span.get("size", 12)
                             color = span.get("color", 0)
                             if isinstance(color, int):
@@ -192,17 +208,33 @@ def replace_text_overlay(doc, page, old_text, new_text, font_buffer, font_name):
                                 b = (color & 0xFF) / 255.0
                                 text_color = (r, g, b)
             
+            # 判断是否带"班"字
+            has_ban = actual_text.endswith("班")
+            
             # 获取背景色
             bg_color = get_background_color(page, rect)
             
+            # 如果带"班"字，覆盖范围要缩小（不覆盖"班"字）
+            if has_ban and len(actual_text) > len(old_text):
+                # 估算"班"字的宽度（大约等于一个字符宽度）
+                char_width = (rect.x1 - rect.x0) / len(actual_text)
+                cover_rect = pymupdf.Rect(
+                    rect.x0 - 1,
+                    rect.y0 - 1,
+                    rect.x1 - char_width + 1,  # 不覆盖"班"字
+                    rect.y1 + 1
+                )
+                new_display_text = new_text + "班"
+            else:
+                cover_rect = pymupdf.Rect(
+                    rect.x0 - 1,
+                    rect.y0 - 1,
+                    rect.x1 + 1,
+                    rect.y1 + 1
+                )
+                new_display_text = new_text
+            
             # 绘制背景矩形覆盖原文字
-            # 稍微扩大一点确保完全覆盖
-            cover_rect = pymupdf.Rect(
-                rect.x0 - 1,
-                rect.y0 - 1,
-                rect.x1 + 1,
-                rect.y1 + 1
-            )
             page.draw_rect(cover_rect, color=bg_color, fill=bg_color)
             
             # 插入新文字
@@ -215,7 +247,7 @@ def replace_text_overlay(doc, page, old_text, new_text, font_buffer, font_name):
             
             page.insert_text(
                 (insert_x, insert_y),
-                new_text,
+                new_display_text,
                 fontname=font_name,
                 fontsize=font_size,
                 color=text_color
