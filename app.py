@@ -1,6 +1,6 @@
 """
-班号批量替换工具 v4 - 灵活格式版
-功能：智能文本替换，支持多种班号格式
+班号批量替换工具 v5 - 支持自定义字体
+功能：智能文本替换，支持上传自定义字体确保完美显示
 作者：微酱
 """
 
@@ -9,7 +9,9 @@ import pymupdf
 import zipfile
 import io
 import re
+import os
 from datetime import datetime
+import tempfile
 
 st.set_page_config(
     page_title="班号批量替换工具",
@@ -23,19 +25,20 @@ st.markdown("---")
 with st.expander("📖 使用说明"):
     st.markdown("""
     ### 功能说明
-    智能替换PDF中的班号文本，支持多种格式
+    智能替换PDF中的班号文本，支持自定义字体
     
     ### 支持的班号格式
     - 3-10位字母或数字的任意组合
-    - 例如：B260830、C12345、ABC123、123456、XYZ999
+    - 例如：B260830、C12345、ABC123
     
-    ### 最佳实践
-    - 新旧班号长度一致
-    - 字符兼容：新班号的字符最好和旧班号相同
+    ### 字体设置
+    - **推荐上传字体**：上传与原PDF相同的字体文件（如 HarmonyOS Sans SC）
+    - 字体格式支持：TTF、OTF
+    - 上传字体后可支持任意字符，不会出现显示异常
     
-    ### 常见问题
-    **Q: 替换后有些字符显示为方框？**  
-    A: PDF嵌入字体只包含原文使用的字符。解决方法：让新班号使用和旧班号相同的字符。
+    ### 如果不上传字体
+    - 工具会尝试使用PDF内嵌字体
+    - 如果新班号包含原字体没有的字符，可能显示为方框
     """)
 
 st.markdown("### 1️⃣ 上传PDF文件")
@@ -50,7 +53,19 @@ if uploaded_files:
     st.success(f"已上传 {len(uploaded_files)} 个文件")
 
 st.markdown("---")
-st.markdown("### 2️⃣ 输入班号")
+st.markdown("### 2️⃣ 上传字体文件（可选但推荐）")
+
+font_file = st.file_uploader(
+    "上传字体文件（TTF/OTF）",
+    type=["ttf", "otf"],
+    help="上传与原PDF相同的字体，确保替换后显示正常。推荐上传 HarmonyOS Sans SC Regular 和 Bold。"
+)
+
+if font_file:
+    st.success(f"✅ 已上传字体：{font_file.name}")
+
+st.markdown("---")
+st.markdown("### 3️⃣ 输入班号")
 
 col1, col2 = st.columns(2)
 
@@ -73,10 +88,8 @@ def parse_class_numbers(text):
     return [n for n in numbers if n]
 
 def validate_class_number(number):
-    """验证班号格式：字母数字组合，3-10位"""
     if not number:
         return False
-    # 允许字母和数字的任意组合
     pattern = r"^[A-Z0-9]{3,10}$"
     return bool(re.match(pattern, number))
 
@@ -91,9 +104,9 @@ if old_numbers and new_numbers:
         invalid_new = [n for n in new_numbers if not validate_class_number(n)]
         
         if invalid_old:
-            st.error(f"❌ 旧班号格式错误：{', '.join(invalid_old)}（格式：3-10位字母或数字）")
+            st.error(f"❌ 旧班号格式错误：{', '.join(invalid_old)}")
         if invalid_new:
-            st.error(f"❌ 新班号格式错误：{', '.join(invalid_new)}（格式：3-10位字母或数字）")
+            st.error(f"❌ 新班号格式错误：{', '.join(invalid_new)}")
         
         if not invalid_old and not invalid_new:
             st.success("✅ 班号格式正确")
@@ -101,15 +114,9 @@ if old_numbers and new_numbers:
             for old, new in zip(old_numbers, new_numbers):
                 if len(old) != len(new):
                     st.warning(f"⚠️ {old}（{len(old)}位）→ {new}（{len(new)}位）：长度不一致")
-                
-                old_chars = set(old)
-                new_chars = set(new)
-                missing = new_chars - old_chars
-                if missing:
-                    st.warning(f"⚠️ {old} → {new}：新字符 {missing} 可能显示异常")
 
 st.markdown("---")
-st.markdown("### 3️⃣ 开始替换")
+st.markdown("### 4️⃣ 开始替换")
 
 can_process = (
     uploaded_files and 
@@ -120,29 +127,8 @@ can_process = (
     all(validate_class_number(n) for n in new_numbers)
 )
 
-def replace_text_smart(page, old_text, new_text):
-    """直接修改PDF内容流"""
-    replacements = 0
-    
-    try:
-        for xref in page.get_contents():
-            content = page.parent.xref_stream(xref)
-            if isinstance(content, bytes):
-                try:
-                    content_str = content.decode('latin-1')
-                    if old_text in content_str:
-                        new_content = content_str.replace(old_text, new_text)
-                        page.parent.update_stream(xref, new_content.encode('latin-1'))
-                        replacements += content_str.count(old_text)
-                except:
-                    pass
-    except:
-        pass
-    
-    return replacements
-
-def replace_text_with_style(page, old_text, new_text):
-    """备用方案：保持样式替换"""
+def replace_text_with_font(page, old_text, new_text, font_buffer=None, font_name=None):
+    """使用指定字体替换文本"""
     replacements = 0
     bg_color = (1, 1, 1)
     
@@ -160,7 +146,6 @@ def replace_text_with_style(page, old_text, new_text):
                         continue
                     
                     rect = pymupdf.Rect(bbox)
-                    font = span.get("font", "helv")
                     size = span.get("size", 11)
                     origin = span.get("origin", (bbox[0], bbox[1]))
                     
@@ -173,6 +158,7 @@ def replace_text_with_style(page, old_text, new_text):
                     else:
                         color_tuple = (0, 0, 0)
                     
+                    # 覆盖原文本
                     shape = page.new_shape()
                     shape.draw_rect(rect)
                     shape.finish(fill=bg_color, color=bg_color)
@@ -180,6 +166,26 @@ def replace_text_with_style(page, old_text, new_text):
                     
                     new_full_text = text.replace(old_text, new_text)
                     
+                    # 如果有上传字体，使用自定义字体
+                    if font_buffer and font_name:
+                        try:
+                            # 插入字体到页面
+                            font_xref = page.insert_font(fontname=font_name, fontbuffer=font_buffer)
+                            # 使用自定义字体插入文本
+                            page.insert_text(
+                                (bbox[0], origin[1]),
+                                new_full_text,
+                                fontname=font_name,
+                                fontsize=size,
+                                color=color_tuple
+                            )
+                            replacements += 1
+                            continue
+                        except Exception as e:
+                            pass
+                    
+                    # 如果没有字体或失败，尝试使用原字体
+                    font = span.get("font", "helv")
                     try:
                         page.insert_text(
                             (bbox[0], origin[1]),
@@ -188,6 +194,7 @@ def replace_text_with_style(page, old_text, new_text):
                             fontsize=size,
                             color=color_tuple
                         )
+                        replacements += 1
                     except:
                         for fallback_font in ["helv", "arial", "times-roman"]:
                             try:
@@ -198,12 +205,30 @@ def replace_text_with_style(page, old_text, new_text):
                                     fontsize=size,
                                     color=color_tuple
                                 )
+                                replacements += 1
                                 break
                             except:
                                 continue
-                    
-                    replacements += 1
     
+    return replacements
+
+def replace_text_smart(page, old_text, new_text):
+    """直接修改PDF内容流（最无痕）"""
+    replacements = 0
+    try:
+        for xref in page.get_contents():
+            content = page.parent.xref_stream(xref)
+            if isinstance(content, bytes):
+                try:
+                    content_str = content.decode('latin-1')
+                    if old_text in content_str:
+                        new_content = content_str.replace(old_text, new_text)
+                        page.parent.update_stream(xref, new_content.encode('latin-1'))
+                        replacements += content_str.count(old_text)
+                except:
+                    pass
+    except:
+        pass
     return replacements
 
 if st.button("🚀 开始替换", disabled=not can_process, type="primary"):
@@ -217,6 +242,14 @@ if st.button("🚀 开始替换", disabled=not can_process, type="primary"):
     
     replace_map = dict(zip(old_numbers, new_numbers))
     
+    # 处理字体文件
+    font_buffer = None
+    font_name = None
+    if font_file:
+        font_buffer = font_file.read()
+        font_name = os.path.splitext(font_file.name)[0]
+        status_text.text(f"已加载字体：{font_name}")
+    
     for i, uploaded_file in enumerate(uploaded_files):
         try:
             status_text.text(f"正在处理：{uploaded_file.name} ({i+1}/{len(uploaded_files)})")
@@ -228,9 +261,15 @@ if st.button("🚀 开始替换", disabled=not can_process, type="primary"):
             
             for page in doc:
                 for old_num, new_num in replace_map.items():
-                    reps = replace_text_smart(page, old_num, new_num)
-                    if reps == 0:
-                        reps = replace_text_with_style(page, old_num, new_num)
+                    # 优先使用内容流替换（最无痕）
+                    if not font_file:  # 只有没上传字体时才尝试
+                        reps = replace_text_smart(page, old_num, new_num)
+                        if reps > 0:
+                            total_replacements += reps
+                            continue
+                    
+                    # 使用字体替换
+                    reps = replace_text_with_font(page, old_num, new_num, font_buffer, font_name)
                     total_replacements += reps
             
             original_name = uploaded_file.name
@@ -258,7 +297,7 @@ if st.button("🚀 开始替换", disabled=not can_process, type="primary"):
     status_text.text("处理完成！")
     
     st.markdown("---")
-    st.markdown("### 4️⃣ 处理结果")
+    st.markdown("### 5️⃣ 处理结果")
     
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -301,6 +340,6 @@ if st.button("🚀 开始替换", disabled=not can_process, type="primary"):
 st.markdown("---")
 st.markdown("""
 <div style="text-align: center; color: #888; font-size: 12px;">
-    Made with ❤️ by 微酱 | v4.0 灵活格式版
+    Made with ❤️ by 微酱 | v5.0 支持自定义字体版
 </div>
 """, unsafe_allow_html=True)
