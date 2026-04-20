@@ -26,8 +26,8 @@ with st.expander("📖 使用说明"):
     智能替换PDF中的班号文本，支持多种格式
     
     ### 支持的班号格式
-    - 字母 + 5-6位数字
-    - 例如：B260830、C12345、A999999
+    - 3-10位字母或数字的任意组合
+    - 例如：B260830、C12345、ABC123、123456、XYZ999
     
     ### 最佳实践
     - 新旧班号长度一致
@@ -57,13 +57,13 @@ col1, col2 = st.columns(2)
 with col1:
     old_class_numbers = st.text_input(
         "旧班号（要被替换的）",
-        placeholder="如：B250675 或 C12345"
+        placeholder="如：B250675、ABC123、123456"
     )
 
 with col2:
     new_class_numbers = st.text_input(
         "新班号",
-        placeholder="如：B260830 或 C12346"
+        placeholder="如：B260830、ABC456、654321"
     )
 
 def parse_class_numbers(text):
@@ -73,8 +73,11 @@ def parse_class_numbers(text):
     return [n for n in numbers if n]
 
 def validate_class_number(number):
-    """验证班号格式：字母 + 5-6位数字"""
-    pattern = r"^[A-Z][0-9]{5,6}$"
+    """验证班号格式：字母数字组合，3-10位"""
+    if not number:
+        return False
+    # 允许字母和数字的任意组合
+    pattern = r"^[A-Z0-9]{3,10}$"
     return bool(re.match(pattern, number))
 
 old_numbers = parse_class_numbers(old_class_numbers)
@@ -88,9 +91,9 @@ if old_numbers and new_numbers:
         invalid_new = [n for n in new_numbers if not validate_class_number(n)]
         
         if invalid_old:
-            st.error(f"❌ 旧班号格式错误：{', '.join(invalid_old)}（格式：字母+5-6位数字）")
+            st.error(f"❌ 旧班号格式错误：{', '.join(invalid_old)}（格式：3-10位字母或数字）")
         if invalid_new:
-            st.error(f"❌ 新班号格式错误：{', '.join(invalid_new)}（格式：字母+5-6位数字）")
+            st.error(f"❌ 新班号格式错误：{', '.join(invalid_new)}（格式：3-10位字母或数字）")
         
         if not invalid_old and not invalid_new:
             st.success("✅ 班号格式正确")
